@@ -8,6 +8,7 @@
 #include "net/TcpConnection.h"
 #include "RtpConnection.h"
 #include "RtspMessage.h"
+#include "DigestAuthentication.h"
 #include "rtsp.h"
 #include <iostream>
 #include <functional>
@@ -24,90 +25,108 @@ class MediaSession;
 class RtspConnection : public TcpConnection
 {
 public:
-    typedef std::function<void (SOCKET sockfd)> CloseCallback;
+	typedef std::function<void (SOCKET sockfd)> CloseCallback;
 
-    enum ConnectionMode
-    {
-        RTSP_SERVER, // RTSP服务器
-        RTSP_PUSHER, // RTSP推流器
-        //RTSP_CLIENT, // RTSP客户端
-    };
+	enum ConnectionMode
+	{
+		RTSP_SERVER, 
+		RTSP_PUSHER,
+		//RTSP_CLIENT,
+	};
 
-    RtspConnection() = delete;
-    RtspConnection(Rtsp *rtspServer, TaskScheduler *taskScheduler, SOCKET sockfd);
-    ~RtspConnection();
+	enum ConnectionState
+	{
+		START_CONNECT,
+		START_PLAY,
+		START_PUSH
+	};
 
-    MediaSessionId getMediaSessionId()
-    { return _sessionId; }
+	RtspConnection() = delete;
+	RtspConnection(std::shared_ptr<Rtsp> rtsp_server, TaskScheduler *task_scheduler, SOCKET sockfd);
+	~RtspConnection();
 
-    TaskScheduler *getTaskScheduler() const 
-    { return _pTaskScheduler; }
+	MediaSessionId GetMediaSessionId()
+	{ return session_id_; }
 
-    void keepAlive()
-    { _aliveCount++; }
+	TaskScheduler *GetTaskScheduler() const 
+	{ return task_scheduler_; }
 
-    bool isAlive() const
-    {
-        if (isClosed())
-        {
-            return false;
-        }
+	void KeepAlive()
+	{ alive_count_++; }
 
-        if(_rtpConnPtr != nullptr)
-        {
-            // 组播暂时不加入心跳检测
-            if(_rtpConnPtr->isMulticast())
-                return true;
-        }
+	bool IsAlive() const
+	{
+		if (IsClosed()) {
+			return false;
+		}
 
-        return (_aliveCount > 0);
-    }
+		if(rtp_conn_ != nullptr) {
+			if (rtp_conn_->IsMulticast()) {
+				return true;
+			}			
+		}
 
-    void resetAliveCount()
-    { _aliveCount = 0; }
+		return (alive_count_ > 0);
+	}
 
-    int getId() const
-    { return _pTaskScheduler->getId(); }
+	void ResetAliveCount()
+	{ alive_count_ = 0; }
+
+	int GetId() const
+	{ return task_scheduler_->GetId(); }
+
+	bool IsPlay() const
+	{ return conn_state_ == START_PLAY; }
+
+	bool IsRecord() const
+	{ return conn_state_ == START_PUSH; }
 
 private:
-    friend class RtpConnection;
-    friend class MediaSession;
-    friend class RtspServer;
-    friend class RtspPusher;
+	friend class RtpConnection;
+	friend class MediaSession;
+	friend class RtspServer;
+	friend class RtspPusher;
 
-    bool onRead(BufferReader& buffer);
-    void onClose();
-    void handleRtcp(SOCKET sockfd);
-    void handleRtcp(BufferReader& buffer);
-    void sendMessage(std::shared_ptr<char> buf, uint32_t size);
-    bool handleRtspRequest(BufferReader& buffer);
-    bool handleRtspResponse(BufferReader& buffer);
+	bool OnRead(BufferReader& buffer);
+	void OnClose();
+	void HandleRtcp(SOCKET sockfd);
+	void HandleRtcp(BufferReader& buffer);   
+	bool HandleRtspRequest(BufferReader& buffer);
+	bool HandleRtspResponse(BufferReader& buffer);
 
-    void handleCmdOption();
-    void handleCmdDescribe();
-    void handleCmdSetup();
-    void handleCmdPlay();
-    void handleCmdTeardown();
-    void handleCmdGetParamter();
+	void SendRtspMessage(std::shared_ptr<char> buf, uint32_t size);
 
-    void sendOptions(ConnectionMode mode= RTSP_SERVER);
-    void sendDescribe();
-    void sendAnnounce();
-    void sendSetup();
-    void handleRecord();
+	void HandleCmdOption();
+	void HandleCmdDescribe();
+	void HandleCmdSetup();
+	void HandleCmdPlay();
+	void HandleCmdTeardown();
+	void HandleCmdGetParamter();
+	bool HandleAuthentication();
 
-    std::atomic_int _aliveCount;
+	void SendOptions(ConnectionMode mode= RTSP_SERVER);
+	void SendDescribe();
+	void SendAnnounce();
+	void SendSetup();
+	void HandleRecord();
 
-    Rtsp* _pRtsp = nullptr;
-    xop::TaskScheduler *_pTaskScheduler = nullptr;
-    enum ConnectionMode _connMode = RTSP_SERVER;
-    MediaSessionId _sessionId = 0;
+	std::atomic_int alive_count_;
+	std::weak_ptr<Rtsp> rtsp_;
+	xop::TaskScheduler *task_scheduler_ = nullptr;
 
-    std::shared_ptr<xop::Channel> _rtpChannelPtr;
-    std::shared_ptr<RtspRequest> _rtspRequestPtr;
-    std::shared_ptr<RtspResponse> _rtspResponsePtr;
-    std::shared_ptr<RtpConnection> _rtpConnPtr;
-    std::shared_ptr<xop::Channel> _rtcpChannels[MAX_MEDIA_CHANNEL];
+	ConnectionMode  conn_mode_ = RTSP_SERVER;
+	ConnectionState conn_state_ = START_CONNECT;
+	MediaSessionId  session_id_ = 0;
+
+	bool has_auth_ = true;
+	std::string _nonce;
+	std::unique_ptr<DigestAuthentication> auth_info_;
+
+	std::shared_ptr<Channel>       rtp_channel_;
+	std::shared_ptr<Channel>       rtcp_channels_[MAX_MEDIA_CHANNEL];
+	std::unique_ptr<RtspRequest>   rtsp_request_;
+	std::unique_ptr<RtspResponse>  rtsp_response_;
+	std::shared_ptr<RtpConnection> rtp_conn_;
 };
 
 }

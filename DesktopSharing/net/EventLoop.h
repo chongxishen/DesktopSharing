@@ -1,4 +1,4 @@
-﻿// PHZ
+// PHZ
 // 2018-5-15
 
 #ifndef XOP_EVENT_LOOP_H
@@ -18,30 +18,40 @@
 #include "Timer.h"
 #include "RingBuffer.h"
 
+#define TASK_SCHEDULER_PRIORITY_LOW       0
+#define TASK_SCHEDULER_PRIORITY_NORMAL    1
+#define TASK_SCHEDULER_PRIORITYO_HIGH     2 
+#define TASK_SCHEDULER_PRIORITY_HIGHEST   3
+#define TASK_SCHEDULER_PRIORITY_REALTIME  4
+
 namespace xop
 {
-	
+
 class EventLoop 
 {
-    public:
-    EventLoop(int nThreads=1); //std::thread::hardware_concurrency()
-    virtual ~EventLoop();
+public:
+	EventLoop(const EventLoop&) = delete;
+	EventLoop &operator = (const EventLoop&) = delete; 
+	EventLoop(uint32_t num_threads =1);  //std::thread::hardware_concurrency()
+	virtual ~EventLoop();
 
-    void loop();
-    void quit();
-    std::shared_ptr<TaskScheduler> getTaskScheduler();
+	std::shared_ptr<TaskScheduler> GetTaskScheduler();
 
-    bool addTriggerEvent(TriggerEvent callback);
-    TimerId addTimer(TimerEvent timerEvent, uint32_t msec);
-    void removeTimer(TimerId timerId);	
-    void updateChannel(ChannelPtr channel);
-    void removeChannel(ChannelPtr& channel);
+	bool AddTriggerEvent(TriggerEvent callback);
+	TimerId AddTimer(TimerEvent timerEvent, uint32_t msec);
+	void RemoveTimer(TimerId timerId);	
+	void UpdateChannel(ChannelPtr channel);
+	void RemoveChannel(ChannelPtr& channel);
 	
+	void Loop();
+	void Quit();
+
 private:
-    std::mutex _mutex;
-    uint32_t _index = 1;
-    std::vector<std::shared_ptr<TaskScheduler>> _taskSchedulers;
-    std::vector<std::shared_ptr<std::thread>> _threads;
+	std::mutex mutex_;
+	uint32_t num_threads_ = 1;
+	uint32_t index_ = 1;
+	std::vector<std::shared_ptr<TaskScheduler>> task_schedulers_;
+	std::vector<std::shared_ptr<std::thread>> threads_;
 };
 
 }

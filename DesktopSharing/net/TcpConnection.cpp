@@ -3,135 +3,153 @@
 
 using namespace xop;
 
-TcpConnection::TcpConnection(TaskScheduler *taskScheduler, SOCKET sockfd)
-	: _taskScheduler(taskScheduler)
-	, _readBufferPtr(new BufferReader)
-	, _writeBufferPtr(new BufferWriter(500))
-	, _channelPtr(new Channel(sockfd))
+TcpConnection::TcpConnection(TaskScheduler *task_scheduler, SOCKET sockfd)
+	: task_scheduler_(task_scheduler)
+	, read_buffer_(new BufferReader)
+	, write_buffer_(new BufferWriter(500))
+	, channel_(new Channel(sockfd))
 {
-    _isClosed = false;
+	is_closed_ = false;
 
-    _channelPtr->setReadCallback([this]() { this->handleRead(); });
-    _channelPtr->setWriteCallback([this]() { this->handleWrite(); });
-    _channelPtr->setCloseCallback([this]() { this->handleClose(); });
-    _channelPtr->setErrorCallback([this]() { this->handleError(); });
+	channel_->SetReadCallback([this]() { this->HandleRead(); });
+	channel_->SetWriteCallback([this]() { this->HandleWrite(); });
+	channel_->SetCloseCallback([this]() { this->HandleClose(); });
+	channel_->SetErrorCallback([this]() { this->HandleError(); });
 
-    SocketUtil::setNonBlock(sockfd);
-    SocketUtil::setSendBufSize(sockfd, 100 * 1024);
-    SocketUtil::setKeepAlive(sockfd);
+	SocketUtil::SetNonBlock(sockfd);
+	SocketUtil::SetSendBufSize(sockfd, 100 * 1024);
+	SocketUtil::SetKeepAlive(sockfd);
 
-    _channelPtr->enableReading();
-    _taskScheduler->updateChannel(_channelPtr);
+	channel_->EnableReading();
+	task_scheduler_->UpdateChannel(channel_);
 }
 
 TcpConnection::~TcpConnection()
 {
-	SOCKET fd = _channelPtr->fd();
-    if (fd > 0)
-    {
-        SocketUtil::close(fd);
-    }
+	SOCKET fd = channel_->GetSocket();
+	if (fd > 0) {
+		SocketUtil::Close(fd);
+	}
 }
 
-void TcpConnection::send(std::shared_ptr<char> data, uint32_t size)
+void TcpConnection::Send(std::shared_ptr<char> data, uint32_t size)
 {
-    if (_isClosed)
-        return;
+	if (!is_closed_) {
+		mutex_.lock();
+		write_buffer_->Append(data, size);
+		mutex_.unlock();
 
-    _writeBufferPtr->append(data, size);
-    this->handleWrite();
-    return;
+		this->HandleWrite();
+	}
 }
 
-void TcpConnection::send(const char *data, uint32_t size)
+void TcpConnection::Send(const char *data, uint32_t size)
 {
-    if (_isClosed)
-        return;
+	if (!is_closed_) {
+		mutex_.lock();
+		write_buffer_->Append(data, size);
+		mutex_.unlock();
 
-    _writeBufferPtr->append(data, size);
-    this->handleWrite();
-    return;
+		this->HandleWrite();
+	}
 }
 
-void TcpConnection::close()
+void TcpConnection::Disconnect()
 {
-    if (_isClosed)
-        return;
-
-    this->handleClose();
+	std::lock_guard<std::mutex> lock(mutex_);
+	auto conn = shared_from_this();
+	task_scheduler_->AddTriggerEvent([conn]() {
+		conn->Close();
+	});
 }
 
-void TcpConnection::handleRead()
+void TcpConnection::HandleRead()
 {
-    if (_isClosed)
-        return;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
 
-	int ret = _readBufferPtr->readFd(_channelPtr->fd());
-    if (ret <= 0)
-    {
-        this->handleClose();
-        return;
-    }
+		if (is_closed_) {
+			return;
+		}
+		
+		int ret = read_buffer_->Read(channel_->GetSocket());
+		if (ret <= 0) {
+			this->Close();
+			return;
+		}
+	}
 
-    if (_readCB)
-    {
-        bool ret = _readCB(shared_from_this(), *_readBufferPtr);
-        if (false == ret)
-        {
-            this->handleClose();
-        }
-    }
+	if (read_cb_) {
+		bool ret = read_cb_(shared_from_this(), *read_buffer_);
+		if (false == ret) {
+			std::lock_guard<std::mutex> lock(mutex_);
+			this->Close();
+		}
+	}
 }
 
-void TcpConnection::handleWrite()
+void TcpConnection::HandleWrite()
 {
-    if (_isClosed)
-        return;
+	if (is_closed_) {
+		return;
+	}
+	
+	//std::lock_guard<std::mutex> lock(mutex_);
+	if (!mutex_.try_lock()) {
+		return;
+	}
 
-    int ret = 0;
-    bool empty = false;
-    do
-    {
-        ret = _writeBufferPtr->send(_channelPtr->fd());
-        if (ret < 0)
-        {
-            handleClose();
-            return;
-        }
-        empty = _writeBufferPtr->isEmpty();
-    } while (0);
+	int ret = 0;
+	bool empty = false;
+	do
+	{
+		ret = write_buffer_->Send(channel_->GetSocket());
+		if (ret < 0) {
+			this->Close();
+			mutex_.unlock();
+			return;
+		}
+		empty = write_buffer_->IsEmpty();
+	} while (0);
 
-    if (empty)
-    {
-        if (_channelPtr->isWriting())
-        {
-            _channelPtr->disableWriting();
-            _taskScheduler->updateChannel(_channelPtr);
-        }
-    }
-    else if(!_channelPtr->isWriting())
-    {
-        _channelPtr->enableWriting();
-        _taskScheduler->updateChannel(_channelPtr);
-    }
+	if (empty) {
+		if (channel_->IsWriting()) {
+			channel_->DisableWriting();
+			task_scheduler_->UpdateChannel(channel_);
+		}
+	}
+	else if(!channel_->IsWriting()) {
+		channel_->EnableWriting();
+		task_scheduler_->UpdateChannel(channel_);
+	}
+
+	mutex_.unlock();
 }
 
-void TcpConnection::handleClose()
+void TcpConnection::Close()
 {
-    std::lock_guard<std::mutex> lock(_mutex);
-    if (!_isClosed)
-    {
-        _isClosed = false;
-        _taskScheduler->removeChannel(_channelPtr);
+	if (!is_closed_) {
+		is_closed_ = true;
+		task_scheduler_->RemoveChannel(channel_);
 
-        if (_closeCB)
-            _closeCB(shared_from_this());
+		if (close_cb_) {
+			close_cb_(shared_from_this());
+		}			
 
-        _disconnectCB(shared_from_this());
-    }
+		if (disconnect_cb_) {
+			disconnect_cb_(shared_from_this());
+		}	
+	}
 }
 
-void TcpConnection::handleError()
+void TcpConnection::HandleClose()
 {
-	this->handleClose();
+	std::lock_guard<std::mutex> lock(mutex_);
+	this->Close();
+}
+
+void TcpConnection::HandleError()
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	this->Close();
 }

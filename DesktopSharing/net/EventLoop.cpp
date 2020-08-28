@@ -1,5 +1,5 @@
-﻿// PHZ
-// 2018-5-24
+// PHZ
+// 2019-10-18
 
 #include "EventLoop.h"
 
@@ -14,104 +14,144 @@
 
 using namespace xop;
 
-EventLoop::EventLoop(int nThreads)
+EventLoop::EventLoop(uint32_t num_threads)
+	: index_(1)
 {
-    static std::once_flag oc_init;
-	std::call_once(oc_init, [] {
-#if defined(WIN32) || defined(_WIN32) 
-		WSADATA wsaData;
-		if (WSAStartup(MAKEWORD(2, 2), &wsaData))
-		{
-			WSACleanup();
-		}
-#endif
-	});
-	if (nThreads <= 0)
-	{
-		nThreads = 1;
+	num_threads_ = 1;
+	if (num_threads > 0) {
+		num_threads_ = num_threads;
 	}
 
-	for (int n=0; n<nThreads; n++)
-	{	
-#if defined(__linux) || defined(__linux__) 
-		std::shared_ptr<TaskScheduler> taskSchedulerPtr(new EpollTaskScheduler(n));
-#elif defined(WIN32) || defined(_WIN32) 
-		std::shared_ptr<TaskScheduler> taskSchedulerPtr(new SelectTaskScheduler(n));
-#endif
-		_taskSchedulers.push_back(taskSchedulerPtr);
-		if (n != 0)
-		{
-			std::shared_ptr<std::thread> t(new std::thread(&TaskScheduler::start, taskSchedulerPtr.get()));
-			_threads.push_back(t);
-		}
-	}
+	this->Loop();
 }
 
 EventLoop::~EventLoop()
 {
-    for (auto iter : _taskSchedulers)
-    {
-        iter->stop();
-    }
-
-    for (auto iter : _threads)
-    {
-        iter->join();
-    }
+	this->Quit();
 }
 
-std::shared_ptr<TaskScheduler> EventLoop::getTaskScheduler()
+std::shared_ptr<TaskScheduler> EventLoop::GetTaskScheduler()
 {
-    std::lock_guard<std::mutex> locker(_mutex);
-    if (_taskSchedulers.size() == 1)
-    {
-        return _taskSchedulers.at(0);
-    }
-    else
-    {
-        auto taskSchedulers = _taskSchedulers.at(_index);
-        _index++;
-        if (_index >= _taskSchedulers.size())
-        {
-            _index = 1;
-        }		
-        return taskSchedulers;
-    }
+	std::lock_guard<std::mutex> locker(mutex_);
+	if (task_schedulers_.size() == 1) {
+		return task_schedulers_.at(0);
+	}
+	else {
+		auto task_scheduler = task_schedulers_.at(index_);
+		index_++;
+		if (index_ >= task_schedulers_.size()) {
+			index_ = 1;
+		}		
+		return task_scheduler;
+	}
 
-    return nullptr;
+	return nullptr;
 }
 
-void EventLoop::loop()
+void EventLoop::Loop()
 {
-	_taskSchedulers[0]->start();
+	std::lock_guard<std::mutex> locker(mutex_);
+
+	if (!task_schedulers_.empty()) {
+		return ;
+	}
+
+	for (uint32_t n = 0; n < num_threads_; n++) 
+	{
+#if defined(__linux) || defined(__linux__) 
+		std::shared_ptr<TaskScheduler> task_scheduler_ptr(new EpollTaskScheduler(n));
+#elif defined(WIN32) || defined(_WIN32) 
+		std::shared_ptr<TaskScheduler> task_scheduler_ptr(new SelectTaskScheduler(n));
+#endif
+		task_schedulers_.push_back(task_scheduler_ptr);
+		std::shared_ptr<std::thread> thread(new std::thread(&TaskScheduler::Start, task_scheduler_ptr.get()));
+		thread->native_handle();
+		threads_.push_back(thread);
+	}
+
+	int priority = TASK_SCHEDULER_PRIORITY_REALTIME;
+
+	for (auto iter : threads_) 
+	{
+#if defined(__linux) || defined(__linux__) 
+
+#elif defined(WIN32) || defined(_WIN32) 
+		switch (priority) 
+		{
+		case TASK_SCHEDULER_PRIORITY_LOW:
+			SetThreadPriority(iter->native_handle(), THREAD_PRIORITY_BELOW_NORMAL);
+			break;
+		case TASK_SCHEDULER_PRIORITY_NORMAL:
+			SetThreadPriority(iter->native_handle(), THREAD_PRIORITY_NORMAL);
+			break;
+		case TASK_SCHEDULER_PRIORITYO_HIGH:
+			SetThreadPriority(iter->native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
+			break;
+		case TASK_SCHEDULER_PRIORITY_HIGHEST:
+			SetThreadPriority(iter->native_handle(), THREAD_PRIORITY_HIGHEST);
+			break;
+		case TASK_SCHEDULER_PRIORITY_REALTIME:
+			SetThreadPriority(iter->native_handle(), THREAD_PRIORITY_TIME_CRITICAL);
+			break;
+		}
+#endif
+	}
 }
 
-void EventLoop::quit()
+void EventLoop::Quit()
 {
-	_taskSchedulers[0]->stop();
+	std::lock_guard<std::mutex> locker(mutex_);
+
+	for (auto iter : task_schedulers_) {
+		iter->Stop();
+	}
+
+	for (auto iter : threads_) {
+		iter->join();
+	}
+
+	task_schedulers_.clear();
+	threads_.clear();
 }
 	
-void EventLoop::updateChannel(ChannelPtr channel)
+void EventLoop::UpdateChannel(ChannelPtr channel)
 {
-	_taskSchedulers[0]->updateChannel(channel);
+	std::lock_guard<std::mutex> locker(mutex_);
+	if (task_schedulers_.size() > 0) {
+		task_schedulers_[0]->UpdateChannel(channel);
+	}	
 }
 
-void EventLoop::removeChannel(ChannelPtr& channel)
+void EventLoop::RemoveChannel(ChannelPtr& channel)
 {
-	_taskSchedulers[0]->removeChannel(channel);
+	std::lock_guard<std::mutex> locker(mutex_);
+	if (task_schedulers_.size() > 0) {
+		task_schedulers_[0]->RemoveChannel(channel);
+	}	
 }
 
-TimerId EventLoop::addTimer(TimerEvent timerEvent, uint32_t msec)
+TimerId EventLoop::AddTimer(TimerEvent timerEvent, uint32_t msec)
 {
-	return _taskSchedulers[0]->addTimer(timerEvent, msec);
+	std::lock_guard<std::mutex> locker(mutex_);
+	if (task_schedulers_.size() > 0) {
+		return task_schedulers_[0]->AddTimer(timerEvent, msec);
+	}
+	return 0;
 }
 
-void EventLoop::removeTimer(TimerId timerId)
+void EventLoop::RemoveTimer(TimerId timerId)
 {
-	return _taskSchedulers[0]->removeTimer(timerId);
+	std::lock_guard<std::mutex> locker(mutex_);
+	if (task_schedulers_.size() > 0) {
+		task_schedulers_[0]->RemoveTimer(timerId);
+	}	
 }
 
-bool EventLoop::addTriggerEvent(TriggerEvent callback)
+bool EventLoop::AddTriggerEvent(TriggerEvent callback)
 {   
-	return _taskSchedulers[0]->addTriggerEvent(callback);
+	std::lock_guard<std::mutex> locker(mutex_);
+	if (task_schedulers_.size() > 0) {
+		return task_schedulers_[0]->AddTriggerEvent(callback);
+	}
+	return false;
 }
